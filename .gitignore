@@ -1,0 +1,22 @@
+
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+.venv/
+.idea/
+.vscode/
+
+# Python test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local secrets and credentials
+secrets/
+credentials/
+
+# Logs and local data
+*.log
+data/

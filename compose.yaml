@@ -1,0 +1,131 @@
+services:
+  kafka:
+    image: apache/kafka:3.9.1
+    container_name: transport-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    mem_limit: 1200m
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 25s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: transport-postgres
+    environment:
+      POSTGRES_DB: transport
+      POSTGRES_USER: transport
+      POSTGRES_PASSWORD: transport_dev_only
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U transport -d transport"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  topic-init:
+    image: apache/kafka:3.9.1
+    container_name: transport-topic-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
+    command:
+      - --bootstrap-server
+      - kafka:9092
+      - --create
+      - --if-not-exists
+      - --topic
+      - vehicle-gps
+      - --partitions
+      - "3"
+      - --replication-factor
+      - "1"
+    restart: "no"
+
+  producer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: transport-producer
+    command: ["python", "-u", "app/producer.py"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: vehicle-gps
+      EVENTS_PER_SECOND: "2"
+      VEHICLE_COUNT: "20"
+    depends_on:
+      topic-init:
+        condition: service_completed_successfully
+    mem_limit: 256m
+    restart: unless-stopped
+
+  spark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: transport-spark
+    command:
+      - spark-submit
+      - --master
+      - local[2]
+      - --packages
+      - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8
+      - --conf
+      - spark.driver.memory=768m
+      - --conf
+      - spark.executor.memory=512m
+      - --conf
+      - spark.sql.shuffle.partitions=2
+      - --conf
+      - spark.streaming.stopGracefullyOnShutdown=true
+      - app/stream_processor.py
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: vehicle-gps
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: transport
+      POSTGRES_USER: transport
+      POSTGRES_PASSWORD: transport_dev_only
+      CHECKPOINT_DIR: /tmp/spark-checkpoint
+    depends_on:
+      topic-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    volumes:
+      - spark_checkpoint:/tmp/spark-checkpoint
+    mem_limit: 2500m
+    restart: unless-stopped
+
+volumes:
+  kafka_data:
+  postgres_data:
+  spark_checkpoint:
